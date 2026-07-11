@@ -171,7 +171,31 @@ class TestBeOS(BaseTester):
         chars = tuple(_g.char for _g in reloaded.glyphs)
         self.assertIn('\U0001f600', chars)
 
-    @unittest.expectedFailure
+    def test_point_size_and_dpi(self) -> None:
+        """BeOS renders 1pt == 1px; loaded fonts declare point size and 72 dpi."""
+        font, *_ = monobit.load(self.konatu_path, format='beos')
+        self.assertEqual(font.point_size, 10)
+        self.assertEqual(tuple(font.dpi), (72, 72))
+
+    def test_genuine_file_roundtrip(self) -> None:
+        """A genuine file round-trips with equal content and passes validation."""
+        font, *_ = monobit.load(self.konatu_path, format='beos')
+        data = self._save_beos(font)
+        self.assertEqual(validate_beos_file(data), [])
+        reloaded, *_ = monobit.load(self.temp_path / 'font.beos', format='beos')
+        self.assertEqual(len(reloaded.glyphs), len(font.glyphs))
+        self.assertEqual(reloaded.family, font.family)
+        self.assertEqual(reloaded.subfamily, font.subfamily)
+        self.assertEqual(reloaded.point_size, font.point_size)
+        for char in ('A', 'g', '!', 'あ'):
+            glyph = font.get_glyph(char)
+            reglyph = reloaded.get_glyph(char)
+            self.assertEqual(glyph.as_matrix(), reglyph.as_matrix())
+            self.assertEqual(glyph.scalable_width, reglyph.scalable_width)
+            self.assertEqual(glyph.left_bearing, reglyph.left_bearing)
+            self.assertEqual(glyph.right_bearing, reglyph.right_bearing)
+            self.assertEqual(glyph.shift_up, reglyph.shift_up)
+
     def test_full_ink_reaches_max_level(self) -> None:
         """
         BeOS grayscale ink is 3-bit (0..7); a fully-inked pixel must map to

@@ -174,7 +174,9 @@ def load_beos(instream: Stream, expand_ink: bool = True):
         family=familyName,
         subfamily=styleName,
         point_size=header.point,
-        # TODO: verify ppem/dpi=72
+        # BeOS renders 1 point == 1 pixel, so the em is `point` pixels;
+        # note that ascent + descent usually exceeds the em
+        dpi=72,
     )
 
 
