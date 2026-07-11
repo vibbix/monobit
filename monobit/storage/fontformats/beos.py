@@ -102,6 +102,136 @@ def _location_hash(code_0: int, code_1: int, hmask: int) -> int:
     """Location-table hash function"""
     return (((code_0 << 3) ^ (code_0 >> 2)) + code_1) & hmask
 
+
+
+
+# acceptance bounds enforced by the BeOS reader
+# (font_file.cpp get_tuned_info, font_set.cpp fc_read_char_from_file)
+_MAX_NAME_LENGTH = 63
+_MAX_POINT_SIZE = 10000
+_MAX_BITMAP_SIZE = 128 * 1024
+_MIN_LEFT, _MAX_RIGHT = -512, 1024
+_MIN_TOP, _MAX_BOTTOM = -1024, 512
+_MAX_EDGE = 2.0
+_MAX_ESCAPE = 1000.0
+
+
+def _validate_header(header) -> list:
+    """Check header fields against BeOS acceptance rules."""
+    problems = []
+    if header.mark != _BEOS_MAGIC:
+        return ['bad magic']
+    if header.ffnSize > _MAX_NAME_LENGTH or header.fsnSize > _MAX_NAME_LENGTH:
+        problems.append(
+            f'name lengths out of range: {header.ffnSize}, {header.fsnSize}'
+        )
+    if header.hmask & (header.hmask + 1) or header.hmask < 3:
+        problems.append(
+            f'location-table mask {header.hmask} not a power of 2 - 1'
+        )
+    if not 1 < header.point <= _MAX_POINT_SIZE:
+        problems.append(f'point size {header.point} out of range')
+    if header.bpp not in (
+            _FC_BLACK_AND_WHITE, _FC_TV_SCALE, _FC_GRAY_SCALE
+        ):
+        problems.append(f'invalid bpp {header.bpp}')
+    if header.version != 0:
+        problems.append(f'invalid version {header.version}')
+    return problems
+
+
+def _validate_glyph_geometry(glyph_data) -> list:
+    """Check glyph bitmap dimensions against BeOS acceptance rules."""
+    width = glyph_data.right - glyph_data.left + 1
+    height = glyph_data.bottom - glyph_data.top + 1
+    bitmap_size = ((width + 1) >> 1) * height
+    problems = []
+    if width < 0 or height < 0:
+        problems.append('negative bitmap dimensions')
+    if not 0 <= bitmap_size <= _MAX_BITMAP_SIZE:
+        problems.append(f'bitmap size {bitmap_size} out of range')
+    if (
+            glyph_data.left < _MIN_LEFT or glyph_data.right > _MAX_RIGHT
+            or glyph_data.top < _MIN_TOP or glyph_data.bottom > _MAX_BOTTOM
+        ):
+        problems.append('bounding box out of range')
+    return problems
+
+
+def _validate_glyph_data(glyph_data) -> list:
+    """Check a full glyph record against BeOS acceptance rules."""
+    problems = _validate_glyph_geometry(glyph_data)
+    # 1234567.0 in edge_left means 'edges not computed', skipping the check
+    if glyph_data.edge_left != _EDGE_LEFT_NOT_COMPUTED and not (
+            -_MAX_EDGE <= glyph_data.edge_left <= _MAX_EDGE
+            and -_MAX_EDGE <= glyph_data.edge_right <= _MAX_EDGE
+        ):
+        problems.append('edges out of range')
+    if not (
+            -_MAX_ESCAPE <= glyph_data.x_escape <= _MAX_ESCAPE
+            and -_MAX_ESCAPE <= glyph_data.y_escape <= _MAX_ESCAPE
+        ):
+        problems.append('escapement out of range')
+    return problems
+
+
+def validate_beos(data: bytes) -> list:
+    """
+    Check a tuned-font file against BeOS R5 acceptance rules.
+
+    Returns a list of problems; empty means the BeOS app_server would
+    accept the file. The location-table rule is verified against a live
+    R5 system; the other bounds follow the BeOS R4 reader sources.
+    """
+    if len(data) < _HEADER.size:
+        return ['file shorter than fixed header']
+    header = _HEADER.from_bytes(data[:_HEADER.size])
+    problems = _validate_header(header)
+    if header.mark != _BEOS_MAGIC:
+        return problems
+    names_end = _HEADER.size + header.ffnSize + header.fsnSize + 2
+    names = data[_HEADER.size:names_end]
+    if len(names) < header.ffnSize + header.fsnSize + 2:
+        return problems + ['truncated names']
+    family, family_nul = names[:header.ffnSize], names[header.ffnSize]
+    style = names[header.ffnSize + 1:header.ffnSize + 1 + header.fsnSize]
+    style_nul = names[header.ffnSize + 1 + header.fsnSize]
+    if family_nul or style_nul or b'\0' in family or b'\0' in style:
+        problems.append('names not correctly NUL-terminated')
+    table_size = _LOCATION_ENTRY.size * (header.hmask + 1)
+    if names_end + table_size > len(data):
+        return problems + ['location table does not fit in file']
+    location_table = (_LOCATION_ENTRY * (header.hmask + 1)).from_bytes(
+        data[names_end:names_end + table_size]
+    )
+    for entry in location_table:
+        # the offset is read as signed by BeOS; empty slots hold -1
+        if not 0 < entry.offset < 0x80000000:
+            continue
+        if entry.offset + _GLYPH_DATA.size > len(data):
+            problems.append(
+                f'glyph record at {entry.offset} does not fit in file'
+            )
+            continue
+        glyph_data = _GLYPH_DATA.from_bytes(
+            data[entry.offset:entry.offset + _GLYPH_DATA.size]
+        )
+        record_problems = _validate_glyph_data(glyph_data)
+        width = glyph_data.right - glyph_data.left + 1
+        height = glyph_data.bottom - glyph_data.top + 1
+        if not record_problems and (
+                entry.offset + _GLYPH_DATA.size
+                + ceildiv(width * 4, 8) * height > len(data)
+            ):
+            record_problems.append('bitmap does not fit in file')
+        problems.extend(
+            f'glyph at {entry.offset}: {_p}' for _p in record_problems
+        )
+        if len(problems) > 10:
+            return problems + ['(further errors suppressed)']
+    return problems
+
+
 @loaders.register(
     name='beos',
     magic=(_BEOS_MAGIC,)
@@ -143,13 +273,21 @@ def load_beos(instream: Stream, expand_ink: bool = True):
     while instream.tell() < header.size:
         pointer = instream.tell()
         glyph_data = _GLYPH_DATA.read_from(instream)
-        # TODO: validate glyph geometry?
+        problems = _validate_glyph_geometry(glyph_data)
+        if problems:
+            raise FileFormatError(
+                f'Bad glyph record at offset {pointer}: '
+                + '; '.join(problems)
+            )
         # bitmap dimensions
         width = glyph_data.right - glyph_data.left + 1
         height = glyph_data.bottom - glyph_data.top + 1
         bitmap_size = ceildiv(width * 4, 8) * height
         glyph_bytes = instream.read(bitmap_size)
-        # TODO sanity check bitmap_size = glyph_bites
+        if len(glyph_bytes) != bitmap_size:
+            raise FileFormatError(
+                f'Glyph bitmap at offset {pointer} extends beyond end of file.'
+            )
         # TODO sanity check legacy_ink - older monobit didn't scale
 
         glyph = Glyph.from_bytes(
@@ -197,7 +335,16 @@ def save_beos(fonts, outstream):
     # create header
     style_name = font.subfamily or font.name[len(font.family):].strip()
     family_name = font.family
-    # TODO: sanity check length
+    if (
+            len(family_name) > _MAX_NAME_LENGTH
+            or len(style_name) > _MAX_NAME_LENGTH
+        ):
+        logger.warning(
+            'Family and style names longer than %d are truncated.',
+            _MAX_NAME_LENGTH,
+        )
+        family_name = family_name[:_MAX_NAME_LENGTH]
+        style_name = style_name[:_MAX_NAME_LENGTH]
     count = _location_table_size(len(glyphs))
     header = _HEADER(
         mark=_BEOS_MAGIC,
