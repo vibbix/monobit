@@ -3,6 +3,15 @@ monobit.storage.fontformats.beos - BeOS Bitmap Font
 
 (c) 2024--2026 Rob Hagemans
 licence: https://opensource.org/licenses/MIT
+
+BeOS renders 1 point == 1 pixel, so a tuned strike's em is its point size
+in pixels - which is usually less than ascent + descent. To export with
+correct strike metrics, pass the em explicitly:
+
+    monobit.save(font, path, format='sfnt',
+                 em_size=font.point_size, fractional_advances=True)
+
+or on the command line: `format=sfnt em-size=12 fractional-advances`.
 """
 
 import logging
