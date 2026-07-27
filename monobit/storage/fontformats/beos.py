@@ -312,7 +312,15 @@ def load_beos(instream: Stream, expand_ink: bool = True):
         if expand_ink:
             glyph = glyph.rescale_ink(16)
         glyphs.append(glyph)
-    ## TODO: sanity check overhang
+    # stored metrics are the linear escapement; app_server re-derives
+    # advance and bearings from the bitmap in process_spacing, so a caller
+    # blitting with the stored advance will overlap these glyphs
+    overhung = sum(1 for _g in glyphs if _g.right_bearing < 0)
+    if overhung:
+        logger.warning(
+            '%d of %d glyphs have a negative right bearing.',
+            overhung, len(glyphs),
+        )
 
     # TODO: detect legacy_ink?
     return Font(
