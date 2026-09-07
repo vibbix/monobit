@@ -61,6 +61,24 @@ class TestGreyscale(BaseTester):
         expected = self.sampletext.replace('38;2;17;17;17m', '38;2;0;0;0m').replace('38;2;119;119;119m', '38;2;102;102;102m')
         self._render_greyscale('beos', expected=expected)
 
+    def test_beos_greyscale_warns_on_quantisation(self):
+        """Saving more levels than BeOS holds is announced, not silent."""
+        font, *_ = monobit.load(self.font_path / 'konatu-ascii.yaff')
+        with self.assertLogs(level='WARNING') as logs:
+            monobit.save(font, self.temp_path / 'warn.beos', format='beos')
+        self.assertTrue(any('quantised' in _m for _m in logs.output))
+
+    def test_beos_greyscale_native_levels(self):
+        """`expand_ink=False` keeps the file's own 8 ink levels."""
+        font, *_ = monobit.load(
+            self.font_path / 'Konatu' / 'Konatu_10',
+            format='beos', expand_ink=False,
+        )
+        self.assertEqual(font.levels, 8)
+        self.assertEqual(
+            max(max(_row) for _row in font.get_glyph('A').as_matrix()), 7,
+        )
+
     def test_nfnt_greyscale(self):
         self._render_greyscale('nfnt')
 
