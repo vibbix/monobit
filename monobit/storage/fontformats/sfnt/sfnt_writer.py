@@ -32,6 +32,7 @@ if fonttools_loaded:
             funits_per_em:int=1024,
             strike_format:str=None, bitmap_table:str=None, ebsc_mapped_sizes:to_range=(),
             glyph_names:str=None,
+            em_size:int=0, fractional_advances:bool=False,
         ):
         """
         Save bitmap font to an sfnt resource (TrueType/OpenType file).
@@ -41,6 +42,8 @@ if fonttools_loaded:
         bitmap_table: type of bitmap resource: 'bdat' (Apple monochrome/greyscale sbit fonts) 'EBDT' (OpenType Bitmap; default for monochrome/greyscale) 'CBDT' (Google colour bitmap; default for colour fonts) 'sbix' (Apple colour bitmap)
         ebsc_mapped_sizes: sizes to include in an EBSC table (may be needed for Windows; default: no EBSC table)
         glyph_names: tagger to set glyph names with. Default is no glyph names. Use 'tags' to use existing tags as glyph names.
+        em_size: pixels per em, used for the strike ppem and design-unit scaling. Default (0) uses the font's pixel-size (ascent + descent), which may differ from the design em.
+        fractional_advances: take hmtx advances from the fractional scalable-width rather than the pixel advance width; horizontal metrics only (default: False)
         """
         # some sfnt flavours *can* store multiple fonts, e.g. different dpi in sbix
         # we don't currently support that.
@@ -48,6 +51,7 @@ if fonttools_loaded:
         tt_font = _create_sfnt(
             font, funits_per_em, strike_format, bitmap_table, ebsc_mapped_sizes,
             glyph_names=glyph_names,
+            em_size=em_size, fractional_advances=fractional_advances,
         )
         tt_font.save(outfile)
         return font
@@ -58,6 +62,7 @@ if fonttools_loaded:
             funits_per_em:int=1024,
             strike_format:str=None, bitmap_table:str=None, ebsc_mapped_sizes:to_range=(),
             glyph_names:str=None,
+            em_size:int=0, fractional_advances:bool=False,
         ):
         """
         Save bitmap fonts to a TrueType/OpenType Collection file.
@@ -67,12 +72,15 @@ if fonttools_loaded:
         bitmap_table: type of bitmap resource: 'bdat' (Apple monochrome/greyscale sbit fonts) 'EBDT' (OpenType Bitmap; default for monochrome/greyscale) 'CBDT' (Google colour bitmap; default for colour fonts) 'sbix' (Apple colour bitmap)
         ebsc_mapped_sizes: sizes to include in an EBSC table (may be needed for Windows; default: no EBSC table)
         glyph_names: tagger to set glyph names with. Default is no glyph names. Use 'tags' to use existing tags as glyph names.
+        em_size: pixels per em, used for the strike ppem and design-unit scaling. Default (0) uses the font's pixel-size (ascent + descent), which may differ from the design em.
+        fractional_advances: take hmtx advances from the fractional scalable-width rather than the pixel advance width; horizontal metrics only (default: False)
         """
         ttc = fonttools.TTCollection()
         ttc.fonts = tuple(
             _create_sfnt(
                 _font, funits_per_em, strike_format, bitmap_table, ebsc_mapped_sizes,
                 glyph_names=glyph_names,
+                em_size=em_size, fractional_advances=fractional_advances,
             )
             for _font in fonts
         )
@@ -240,10 +248,10 @@ def _convert_to_vhea_props(font, _to_funits):
     )
 
 
-def _convert_to_hmtx_props(glyphs, _to_funits):
+def _convert_to_hmtx_props(glyphs, _to_funits, _advance_to_funits):
     """Convert glyph properties to `hmtx` table."""
     return {
-        _name: (_to_funits(_g.advance_width), _to_funits(_g.left_bearing))
+        _name: (_advance_to_funits(_g), _to_funits(_g.left_bearing))
         for _name, _g in glyphs.items()
     }
 
@@ -383,7 +391,7 @@ def convert_to_glyph(glyph, fb, strike_format, rgb_table):
     return bmga
 
 
-def _setup_eblc_table(fb, font, glyphs, ebdt_name, eblc_name):
+def _setup_eblc_table(fb, font, glyphs, ebdt_name, eblc_name, ppem):
     """Build `EBLC` bitmap locations table."""
     eblc = fonttools.newTable(eblc_name)
     eblc.version = 3.0 if eblc_name == 'CBLC' else 2.0
@@ -423,7 +431,7 @@ def _setup_eblc_table(fb, font, glyphs, ebdt_name, eblc_name):
         else:
             vert = fonttools._create_sbit_line_metrics()
         strike.bitmapSizeTable = fonttools._create_bitmap_size_table(
-            font.pixel_size, hori, vert,
+            ppem, hori, vert,
             depth=32 if font.rgb_table else (font.levels-1).bit_length(),
         )
         strike.indexSubTables = fonttools._create_index_subtables(fb, sdata)
@@ -434,7 +442,7 @@ def _setup_eblc_table(fb, font, glyphs, ebdt_name, eblc_name):
     fb.font[eblc_name] = eblc
 
 
-def _setup_sbix_table(fb, font, glyphs, strike_format):
+def _setup_sbix_table(fb, font, glyphs, strike_format, ppem):
     """Build `sbix` bitmap table."""
     strike_format = strike_format[:4].lower().ljust(4)
     if strike_format not in ('png ', 'tiff'):
@@ -451,7 +459,7 @@ def _setup_sbix_table(fb, font, glyphs, strike_format):
     sbix.flags = 1
     # create strike
     strike = fonttools.sbixStrike()
-    strike.ppem = font.pixel_size
+    strike.ppem = ppem
     strike.resolution = font.dpi[0]
     strike.glyphs = {}
     for name, glyph in glyphs.items():
@@ -504,15 +512,28 @@ def _prepare_for_sfnt(font, glyph_names):
     return font, default
 
 
-def _create_sfnt(font, funits_per_em, strike_format, bitmap_table, ebsc_mapped_sizes, glyph_names):
+def _create_sfnt(
+        font, funits_per_em, strike_format, bitmap_table, ebsc_mapped_sizes,
+        glyph_names, em_size=0, fractional_advances=False,
+    ):
     """Convert to a fontTools TTFont object."""
+    check_fonttools()
+    font, default = _prepare_for_sfnt(font, glyph_names)
+    # take the ppem from the prepared font, as reduce() may change pixel-size
+    ppem = em_size or font.pixel_size
+
     # converter from pixels to design units
     # note that x and y ppem are equal - if not, fontforge rejects the bitmap
     def _to_funits(pixel_amount):
-        return ceildiv(pixel_amount * funits_per_em, font.pixel_size)
+        return ceildiv(pixel_amount * funits_per_em, ppem)
 
-    check_fonttools()
-    font, default = _prepare_for_sfnt(font, glyph_names)
+    if fractional_advances:
+        # keep the fraction, rounding once at design-unit scale
+        def _advance_to_funits(glyph):
+            return round(glyph.scalable_width * funits_per_em / ppem)
+    else:
+        def _advance_to_funits(glyph):
+            return _to_funits(glyph.advance_width)
     # get the storable glyphs
     glyphnames = (NOTDEF_NAME, *(_t.value for _t in font.get_tags()))
     glyphs = {
@@ -532,7 +553,7 @@ def _create_sfnt(font, funits_per_em, strike_format, bitmap_table, ebsc_mapped_s
             bitmap_table = 'EBDT'
     if bitmap_table.lower() == 'sbix':
         strike_format = (strike_format or 'png').lower()
-        _setup_sbix_table(fb, font, glyphs, strike_format)
+        _setup_sbix_table(fb, font, glyphs, strike_format, ppem)
     else:
         if bitmap_table.lower() == 'bdat':
             ebdt_name, eblc_name = 'bdat', 'bloc'
@@ -547,11 +568,13 @@ def _create_sfnt(font, funits_per_em, strike_format, bitmap_table, ebsc_mapped_s
             )
         strike_format = (strike_format or 'bit').lower()
         _setup_ebdt_table(fb, font, glyphs, strike_format, ebdt_name)
-        _setup_eblc_table(fb, font, glyphs, ebdt_name, eblc_name)
+        _setup_eblc_table(fb, font, glyphs, ebdt_name, eblc_name, ppem)
     ebsc_mapped_sizes = tuple(ebsc_mapped_sizes)
     if ebsc_mapped_sizes:
-        fonttools._setup_ebsc_table(fb, {font.pixel_size: ebsc_mapped_sizes})
-    fb.setupHorizontalMetrics(_convert_to_hmtx_props(glyphs, _to_funits))
+        fonttools._setup_ebsc_table(fb, {ppem: ebsc_mapped_sizes})
+    fb.setupHorizontalMetrics(
+        _convert_to_hmtx_props(glyphs, _to_funits, _advance_to_funits)
+    )
     fb.setupHorizontalHeader(**_convert_to_hhea_props(font, _to_funits))
     # check for vertical metrics, include `vhea` and `vmtx` if present
     if font.has_vertical_metrics():
