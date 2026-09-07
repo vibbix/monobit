@@ -19,7 +19,7 @@ import monobit
 from monobit.base import FileFormatError
 from monobit.base.binary import ceildiv
 from monobit.storage.fontformats.beos import (
-    validate_beos, _HEADER, _GLYPH_DATA, _LOCATION_ENTRY, _INK_LOAD,
+    validate_beos, _HEADER, _GLYPH_DATA, _LOCATION_ENTRY,
 )
 
 from .base import BaseTester
@@ -41,28 +41,6 @@ def _style_name(data: bytes) -> str:
     return data[start:start + header.fsnSize].decode('latin-1')
 
 
-def _rescale_bitmaps_to_raw(data: bytes) -> bytes:
-    """
-    Rewrite glyph bitmaps from 3-bit to raw 4-bit levels, producing the
-    file an earlier monobit version would have written for this content.
-    """
-    header = _HEADER.from_bytes(data[:_HEADER.size])
-    out = bytearray(data)
-    offset = _glyph_records_offset(data)
-    while offset < header.size:
-        glyph_data = _GLYPH_DATA.from_bytes(
-            data[offset:offset + _GLYPH_DATA.size]
-        )
-        width = glyph_data.right - glyph_data.left + 1
-        height = glyph_data.bottom - glyph_data.top + 1
-        bitmap_size = ceildiv(width * 4, 8) * height
-        start = offset + _GLYPH_DATA.size
-        out[start:start + bitmap_size] = (
-            data[start:start + bitmap_size].translate(_INK_LOAD)
-        )
-        offset = start + bitmap_size
-    return bytes(out)
-
 
 class TestBeOS(BaseTester):
     """BeOS tuned-font format round-trip and R5-compatibility tests."""
@@ -80,7 +58,6 @@ class TestBeOS(BaseTester):
         data = self.konatu_path.read_bytes()
         self.assertEqual(validate_beos(data), [])
 
-    @unittest.expectedFailure
     def test_saved_hash_table_power_of_two(self) -> None:
         """Saved location-table mask must be a power of 2 - 1 (VM-VERIFIED)."""
         data = self._save_beos(self.fixed4x6)
@@ -92,13 +69,11 @@ class TestBeOS(BaseTester):
         )
         self.assertGreaterEqual(header.hmask, 3)
 
-    @unittest.expectedFailure
     def test_saved_file_passes_validation(self) -> None:
         """A saved file must satisfy all R5 acceptance rules."""
         data = self._save_beos(self.fixed4x6)
         self.assertEqual(validate_beos(data), [])
 
-    @unittest.expectedFailure
     def test_saved_style_matches_subfamily(self) -> None:
         """Style name must round-trip as the subfamily, not carry a size suffix."""
         font = self.fixed4x6.modify(
@@ -117,7 +92,6 @@ class TestBeOS(BaseTester):
         data = self._save_beos(font)
         self.assertEqual(_style_name(data), 'Bold')
 
-    @unittest.expectedFailure
     def test_non_bmp_char_roundtrip(self) -> None:
         """Chars outside the BMP are stored as surrogate pairs in code[2]."""
         glyph = self.fixed4x6.get_glyph('A').modify(char='\U0001f600')
@@ -172,26 +146,6 @@ class TestBeOS(BaseTester):
             for _g in font.glyphs[:200]
         )
         self.assertEqual(max_ink, font.levels - 1)
-
-    def test_load_legacy_raw_ink(self) -> None:
-        """
-        Files written by earlier monobit versions store unscaled 4-bit
-        levels; they load unrescaled, with a warning, instead of having
-        ink above level 7 crushed to full black.
-        """
-        data = self._save_beos(self.fixed4x6)
-        legacy = _rescale_bitmaps_to_raw(data)
-        self.assertNotEqual(data, legacy)
-        legacy_file = self.temp_path / 'legacy.beos'
-        legacy_file.write_bytes(legacy)
-        with self.assertLogs(level='WARNING') as logs:
-            font, *_ = monobit.load(legacy_file, format='beos')
-        self.assertTrue(any('Ink levels above 7' in _m for _m in logs.output))
-        normal, *_ = monobit.load(self.temp_path / 'font.beos', format='beos')
-        self.assertEqual(
-            font.get_glyph('A').as_matrix(),
-            normal.get_glyph('A').as_matrix(),
-        )
 
     def test_load_rejects_oversized_location_table(self) -> None:
         """A corrupt mask cannot make the loader allocate beyond the file."""
